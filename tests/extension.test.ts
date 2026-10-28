@@ -3,16 +3,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import type { Provider } from '@earendil-works/pi-ai'
-import type { ProviderConfig } from '@earendil-works/pi-coding-agent'
+import type { Provider, RefreshModelsContext } from '@earendil-works/pi-ai'
 import workbuddyConnect from '../src/index.ts'
 import { AI_VARIANT, CN_VARIANT } from '../src/variants.ts'
 
-/** One captured provider registration: the native provider or the overlay. */
+/** One captured native provider registration. */
 interface Registration {
   id: string
-  provider?: Provider
-  config?: ProviderConfig
+  provider: Provider
 }
 
 /** Register the extension against a captured fake `ExtensionAPI`. */
@@ -20,10 +18,8 @@ function register(): { registrations: Registration[]; commands: string[] } {
   const registrations: Registration[] = []
   const commands: string[] = []
   workbuddyConnect({
-    registerProvider(providerOrName: Provider | string, config?: ProviderConfig) {
-      registrations.push(typeof providerOrName === 'string'
-        ? { id: providerOrName, ...config === undefined ? {} : { config } }
-        : { id: providerOrName.id, provider: providerOrName })
+    registerProvider(provider: Provider) {
+      registrations.push({ id: provider.id, provider })
     },
     registerCommand(name: string) {
       commands.push(name)
@@ -34,16 +30,24 @@ function register(): { registrations: Registration[]; commands: string[] } {
 
 /** The native provider for one variant. */
 function providerFor(registrations: readonly Registration[], id: string): Provider {
-  const provider = registrations.find(entry => entry.id === id && entry.provider !== undefined)?.provider
+  const provider = registrations.find(entry => entry.id === id)?.provider
   assert.ok(provider !== undefined, `no native provider registered for ${id}`)
   return provider
 }
 
-/** The overlay registration for one variant. */
-function overlayFor(registrations: readonly Registration[], id: string): ProviderConfig {
-  const config = registrations.find(entry => entry.id === id && entry.config !== undefined)?.config
-  assert.ok(config !== undefined, `no overlay registered for ${id}`)
-  return config
+/** Run the provider's catalog refresh the way Pi does, applying `publish`. */
+async function refreshRoster(provider: Provider, allowNetwork: boolean): Promise<void> {
+  const refresh = provider.refreshModels
+  assert.ok(refresh !== undefined, `provider ${provider.id} has no refreshModels`)
+  const context: RefreshModelsContext = {
+    allowNetwork,
+    signal: new AbortController().signal,
+    publish: async (publication) => {
+      publication.update?.()
+      return true
+    },
+  }
+  await refresh(context)
 }
 
 /** The live catalog shape the CN gateway returns for a CLI identity. */
@@ -104,15 +108,10 @@ async function withStubbedFetch(
   }
 }
 
-test('each variant registers a native provider plus a replacing overlay, and one command', () => {
+test('each variant registers one native provider with a replacing refresh, and one command', () => {
   const { registrations, commands } = register()
-  assert.deepEqual(registrations.map(entry => entry.id), [
-    CN_VARIANT.id,
-    CN_VARIANT.id,
-    AI_VARIANT.id,
-    AI_VARIANT.id,
-  ])
-  assert.ok(overlayFor(registrations, CN_VARIANT.id).refreshModels !== undefined)
+  assert.deepEqual(registrations.map(entry => entry.id), [CN_VARIANT.id, AI_VARIANT.id])
+  assert.ok(providerFor(registrations, CN_VARIANT.id).refreshModels !== undefined)
   assert.deepEqual(commands, ['workbuddy'])
 })
 
@@ -128,34 +127,33 @@ test('a provider starts from the built-in table before any fetch', () => {
   assert.ok(cn.auth.apiKey !== undefined)
 })
 
-test('the overlay fetch returns the live roster with display metadata', async () => {
+test('a live refresh replaces the built-in table instead of merging into it', async () => {
   await withStubbedFetch(() => new Response(JSON.stringify(cnCatalog()), { status: 200 }), async () => {
     const { registrations } = register()
-    const overlay = overlayFor(registrations, CN_VARIANT.id)
-    const models = await overlay.refreshModels!({
-      publish: async () => true,
-      allowNetwork: true,
-      signal: new AbortController().signal,
-    })
+    const provider = providerFor(registrations, CN_VARIANT.id)
+    const builtinIds = provider.getModels().map(model => model.id)
+    await refreshRoster(provider, false)
+    assert.deepEqual(provider.getModels().map(model => model.id), builtinIds)
+    await refreshRoster(provider, true)
+    const models = provider.getModels()
     assert.deepEqual(models.map(model => model.id), ['alpha', 'beta'])
     assert.deepEqual(models.map(model => model.name), ['Alpha · x0.25', 'Beta'])
     assert.deepEqual(models.find(model => model.id === 'alpha')?.input, ['text'])
-    // The overlay replaces the native list rather than merging into it, which
-    // is the reason it exists; it also owns no baseUrl of its own.
-    assert.equal('baseUrl' in models[0]!, false)
+    assert.equal(models[0]?.baseUrl, 'https://copilot.tencent.com/v2')
+    assert.ok(builtinIds.every(id => !models.some(model => model.id === id)))
   })
 })
 
-test('a failed overlay fetch throws instead of persisting the captured table', async () => {
+test('a failed live refresh throws and keeps the previous roster', async () => {
   await withStubbedFetch(() => new Response('{"code":4001,"msg":"expired"}', { status: 401 }), async () => {
     const { registrations } = register()
-    await assert.rejects(overlayFor(registrations, CN_VARIANT.id).refreshModels!({
-      publish: async () => true,
-      allowNetwork: true,
-      signal: new AbortController().signal,
-    }), /workbuddy upstream rejected the request/u)
-    // The native provider keeps serving its last known roster.
-    assert.ok(providerFor(registrations, CN_VARIANT.id).getModels().length > 0)
+    const provider = providerFor(registrations, CN_VARIANT.id)
+    const before = provider.getModels().map(model => model.id)
+    await assert.rejects(
+      refreshRoster(provider, true),
+      /workbuddy upstream rejected the request/u,
+    )
+    assert.deepEqual(provider.getModels().map(model => model.id), before)
   })
 })
 

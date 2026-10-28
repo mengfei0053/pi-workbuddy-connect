@@ -74,7 +74,7 @@ npm test          # node --test，直接运行 TypeScript
 npm run typecheck
 ```
 
-`src/` 按职责拆分：`variants.ts` 存放两版之间的全部差异，`auth.ts` 与 `desktop-credential.ts` 负责凭据，`upstream.ts` 负责目录、刷新与积分，`payload.ts` 修正请求体，`models.ts` 把目录翻译成 Pi 的模型描述，`index.ts` 组装并注册（原生 provider + 替换语义的 overlay）。
+`src/` 按职责拆分：`variants.ts` 存放两版之间的全部差异，`auth.ts` 与 `desktop-credential.ts` 负责凭据，`upstream.ts` 负责目录、刷新与积分，`payload.ts` 修正请求体，`models.ts` 把目录翻译成 Pi 的模型描述，`index.ts` 组装并注册一个原生 provider，在线目录整表替换启动时的内置表。
 
 测试用 `node --test` 直接运行 TypeScript，覆盖目录解析、凭据合并与刷新策略、加密信封、请求体归一，以及一次真实的本地 HTTP 往返（验证 `stream`、`max_tokens`、无 `developer` 角色、档位映射）。
 

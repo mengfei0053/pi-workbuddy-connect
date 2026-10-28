@@ -9,7 +9,6 @@
  */
 
 import type { Model, ModelThinkingLevel, ThinkingLevelMap } from '@earendil-works/pi-ai'
-import type { ProviderModelConfig } from '@earendil-works/pi-coding-agent'
 import type { WorkBuddyModelInfo } from './catalog.ts'
 import type { WorkBuddyVariant } from './variants.ts'
 
@@ -132,19 +131,4 @@ export function toPiModels(
   baseUrl: string,
 ): Model<'openai-completions'>[] {
   return models.map(model => toPiModel(model, variant, baseUrl))
-}
-
-/**
- * Build the overlay registration's model list.
- *
- * The overlay form takes `ProviderModelConfig` values rather than complete
- * descriptors: pi composes them over the provider registered natively, so
- * `api`, `provider`, and `baseUrl` stay owned by that registration and must
- * not be repeated here.
- */
-export function toProviderModels(models: readonly WorkBuddyModelInfo[]): ProviderModelConfig[] {
-  return models.map(info => {
-    const fields = catalogFields(info)
-    return { ...fields, input: [...fields.input] }
-  })
 }

@@ -30,11 +30,11 @@ import type {
   StreamOptions,
   TranscriptContext,
 } from '@earendil-works/pi-ai'
-import type { ExtensionAPI, ExtensionCommandContext, ProviderConfig } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent'
 import { resolveAgentDir, WorkBuddyCredentialStore } from './auth.ts'
 import { FALLBACK_AI_MODELS, FALLBACK_CN_MODELS, type WorkBuddyModelInfo } from './catalog.ts'
 import { clearProtectorKeyCache } from './desktop-credential.ts'
-import { toPiModels, toProviderModels } from './models.ts'
+import { toPiModels } from './models.ts'
 import { normalizeChatBody, type ChatBody } from './payload.ts'
 import {
   chatHeaders,
@@ -278,6 +278,41 @@ function formatTokens(count: number): string {
   return `${count}`
 }
 
+/**
+ * Hang the live catalog off the one native provider.
+ *
+ * Pi 1.4 flushes config overlays before native providers, then drops an
+ * overlay when the native provider for the same id is registered. A second
+ * `registerProvider` therefore never replaces the startup snapshot.
+ * `createProvider`'s `fetchModels` is also the wrong hook: it merges into
+ * that snapshot, so a model the upstream retired would stay in the picker.
+ * Replacing `getModels` here keeps a single registration and still swaps the
+ * whole roster. A failed fetch throws before `publish`, so the previous
+ * roster stays.
+ */
+function attachLiveRoster(
+  provider: Provider,
+  state: VariantRuntime,
+  variant: WorkBuddyVariant,
+  baseUrl: string,
+): void {
+  let roster = toPiModels(state.models(), variant, baseUrl)
+  provider.getModels = () => roster
+  provider.getAllModels = () => roster
+  provider.refreshModels = async (context) => {
+    if (!context.allowNetwork || context.signal.aborted) return
+    const result = await state.refresh()
+    if (context.signal.aborted) return
+    if (result.source !== 'live') throw new Error(result.error ?? 'catalog unavailable')
+    const next = toPiModels(result.models, variant, baseUrl)
+    await context.publish({
+      update: () => {
+        roster = next
+      },
+    })
+  }
+}
+
 /** Send command output through the UI when there is one, else stdout. */
 function notify(ctx: ExtensionCommandContext, text: string): void {
   if (ctx.hasUI) ctx.ui.notify(text, 'info')
@@ -306,22 +341,8 @@ export default function workbuddyConnect(pi: ExtensionAPI): void {
         models: toPiModels(state.models(), variant, baseUrl),
         api: providerStreams(state),
       })
+      attachLiveRoster(provider, state, variant, baseUrl)
       pi.registerProvider(provider)
-
-      // The live roster arrives through the *overlay* registration, whose
-      // `refreshModels` result replaces the provider's models. The native
-      // `fetchModels` hook cannot be used for this: it merges into the static
-      // baseline, so a model upstream retired would stay in the picker
-      // forever. A failed fetch throws and leaves the last known roster in
-      // place, so the captured table is never persisted as if it were live.
-      const overlay: ProviderConfig = {
-        refreshModels: async () => {
-          const result = await state.refresh()
-          if (result.source !== 'live') throw new Error(result.error ?? 'catalog unavailable')
-          return toProviderModels(result.models)
-        },
-      }
-      pi.registerProvider(variant.id, overlay)
     } catch (error: unknown) {
       state.registrationError = error instanceof Error ? error.message : String(error)
     }
@@ -341,9 +362,8 @@ export default function workbuddyConnect(pi: ExtensionAPI): void {
       }
       if (action === 'refresh') {
         // The manual recovery path after signing in or switching accounts: drop
-        // the cached decryption key and let Pi re-run each provider's overlay
-        // refresh, which re-reads the catalog and replaces the published model
-        // list, so the picker reflects the new account without a restart.
+        // the cached decryption key and let Pi re-run each provider's catalog
+        // refresh, which replaces the published model list.
         clearProtectorKeyCache()
         await ctx.modelRegistry.refresh({ providers: WORKBUDDY_VARIANTS.map(variant => variant.id) })
         notify(ctx, await report(runtimes, 'status'))
